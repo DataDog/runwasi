@@ -51,6 +51,7 @@ opentelemetry-otlp = { version = "0.16.0", default-features = false, features = 
     "grpc-tonic",
     "http-proto",
     "reqwest-client",
+    "reqwest-rustls",
     "trace",
 ], optional = true }
 opentelemetry_sdk = { version = "0.23", default-features = false, features = [
@@ -59,7 +60,7 @@ opentelemetry_sdk = { version = "0.23", default-features = false, features = [
 tracing-opentelemetry = { version = "0.24", optional = true }
 
 # vendored code
-time = { version = "0.3.45", features = ["serde", "std", "formatting"] }
+time = { version = ">=0.3.45, <0.3.47", features = ["serde", "std", "formatting"] }
 
 [target.'cfg(unix)'.dependencies]
 zygote = { version = "0.1.2" }
