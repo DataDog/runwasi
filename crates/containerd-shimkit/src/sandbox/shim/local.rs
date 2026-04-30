@@ -7,11 +7,13 @@ use std::sync::Arc;
 use anyhow::ensure;
 use containerd_shim::api::{
     ConnectRequest, ConnectResponse, CreateTaskRequest, CreateTaskResponse, DeleteRequest, Empty,
-    KillRequest, ShutdownRequest, StartRequest, StartResponse, StateRequest, StateResponse,
-    StatsRequest, StatsResponse, WaitRequest, WaitResponse,
+    ExecProcessRequest, KillRequest, ShutdownRequest, StartRequest, StartResponse, StateRequest,
+    StateResponse, StatsRequest, StatsResponse, WaitRequest, WaitResponse,
 };
 use containerd_shim::error::Error as ShimError;
-use containerd_shim::protos::events::task::{TaskCreate, TaskDelete, TaskExit, TaskIO, TaskStart};
+use containerd_shim::protos::events::task::{
+    TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskExit, TaskIO, TaskStart,
+};
 use containerd_shim::protos::shim::shim_ttrpc::Task;
 use containerd_shim::protos::types::task::Status;
 use containerd_shim::util::IntoOption;
@@ -29,7 +31,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 #[cfg(feature = "opentelemetry")]
 use super::otel::extract_context;
 use crate::sandbox::async_utils::AmbientRuntime as _;
-use crate::sandbox::instance::{Instance, InstanceConfig};
+use crate::sandbox::instance::{ExecConfig, Instance, InstanceConfig};
 use crate::sandbox::shim::events::{EventSender, RemoteEventSender, ToTimestamp};
 use crate::sandbox::shim::instance_data::InstanceData;
 use crate::sandbox::sync::WaitableCell;
@@ -231,11 +233,44 @@ impl<T: Instance + Send + Sync, E: EventSender> Local<T, E> {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Debug"))]
     async fn task_start(&self, req: StartRequest) -> Result<StartResponse> {
+        let i = self.get_instance(req.id()).await?;
+
         if req.exec_id().is_empty().not() {
-            return Err(ShimError::Unimplemented("exec is not supported".to_string()).into());
+            let exec_id = req.exec_id().to_string();
+            let pid = i.start_exec(&exec_id).await?;
+
+            self.events.send(TaskExecStarted {
+                container_id: req.id().into(),
+                exec_id: exec_id.clone(),
+                pid,
+                ..Default::default()
+            });
+
+            let events = self.events.clone();
+            let container_id = req.id().to_string();
+
+            async move {
+                let (exit_code, timestamp) = i.wait_exec(&exec_id).await.unwrap_or_else(|e| {
+                    log::error!("wait_exec failed for {exec_id}: {e}");
+                    (1, chrono::Utc::now())
+                });
+                events.send(TaskExit {
+                    container_id: container_id.clone(),
+                    id: exec_id,
+                    exit_status: exit_code,
+                    exited_at: Some(timestamp.to_timestamp()).into(),
+                    pid,
+                    ..Default::default()
+                });
+            }
+            .spawn();
+
+            return Ok(StartResponse {
+                pid,
+                ..Default::default()
+            });
         }
 
-        let i = self.get_instance(req.id()).await?;
         let pid = i.start().await?;
 
         self.events.send(TaskStart {
@@ -271,23 +306,60 @@ impl<T: Instance + Send + Sync, E: EventSender> Local<T, E> {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Debug"))]
     async fn task_kill(&self, req: KillRequest) -> Result<Empty> {
+        let i = self.get_instance(req.id()).await?;
         if !req.exec_id().is_empty() {
-            return Err(Error::InvalidArgument("exec is not supported".to_string()));
+            i.kill_exec(req.exec_id(), req.signal()).await?;
+        } else {
+            i.kill(req.signal()).await?;
         }
-        self.get_instance(req.id())
-            .await?
-            .kill(req.signal())
-            .await?;
         Ok(Empty::new())
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Debug"))]
     async fn task_delete(&self, req: DeleteRequest) -> Result<DeleteResponse> {
-        if !req.exec_id().is_empty() {
-            return Err(Error::InvalidArgument("exec is not supported".to_string()));
-        }
-
         let i = self.get_instance(req.id()).await?;
+
+        if !req.exec_id().is_empty() {
+            let exec_id = req.exec_id();
+            let pid = i.exec_pid(exec_id).await?.unwrap_or_default();
+
+            let (exit_code, timestamp) = if pid == 0 {
+                // Never started
+                (0u32, chrono::Utc::now())
+            } else {
+                // Started, must have already exited
+                let exit_info = i.wait_exec(exec_id).now_or_never();
+                match exit_info {
+                    Some(Ok(v)) => v,
+                    Some(Err(e)) => {
+                        log::warn!("wait_exec error during delete for {exec_id}: {e}");
+                        (0, chrono::Utc::now())
+                    }
+                    None => {
+                        return Err(Error::FailedPrecondition(format!(
+                            "exec {exec_id} is still running; kill it before deleting"
+                        )));
+                    }
+                }
+            };
+
+            let ts = timestamp.to_timestamp();
+            i.delete_exec(exec_id).await?;
+            self.events.send(TaskDelete {
+                container_id: req.id().into(),
+                id: exec_id.to_string(),
+                pid,
+                exit_status: exit_code,
+                exited_at: Some(ts.clone()).into(),
+                ..Default::default()
+            });
+            return Ok(DeleteResponse {
+                pid,
+                exit_status: exit_code,
+                exited_at: Some(ts).into(),
+                ..Default::default()
+            });
+        }
 
         i.delete().await?;
 
@@ -315,11 +387,17 @@ impl<T: Instance + Send + Sync, E: EventSender> Local<T, E> {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Debug"))]
     async fn task_wait(&self, req: WaitRequest) -> Result<WaitResponse> {
+        let i = self.get_instance(req.id()).await?;
+
         if !req.exec_id().is_empty() {
-            return Err(Error::InvalidArgument("exec is not supported".to_string()));
+            let (exit_code, timestamp) = i.wait_exec(req.exec_id()).await?;
+            return Ok(WaitResponse {
+                exit_status: exit_code,
+                exited_at: Some(timestamp.to_timestamp()).into(),
+                ..Default::default()
+            });
         }
 
-        let i = self.get_instance(req.id()).await?;
         let (exit_code, timestamp) = i.wait().await;
 
         debug!("wait finishes");
@@ -332,11 +410,33 @@ impl<T: Instance + Send + Sync, E: EventSender> Local<T, E> {
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Debug"))]
     async fn task_state(&self, req: StateRequest) -> Result<StateResponse> {
+        let i = self.get_instance(req.id()).await?;
+
         if !req.exec_id().is_empty() {
-            return Err(Error::InvalidArgument("exec is not supported".to_string()));
+            let exec_id = req.exec_id();
+            let pid = i.exec_pid(exec_id).await?;
+            let exit_info = i.wait_exec(exec_id).now_or_never();
+            let (exit_code, timestamp) = match exit_info {
+                Some(Ok(v)) => (Some(v.0), Some(v.1.to_timestamp())),
+                _ => (None, None),
+            };
+            let status = if pid.is_none() {
+                Status::CREATED
+            } else if exit_code.is_none() {
+                Status::RUNNING
+            } else {
+                Status::STOPPED
+            };
+            return Ok(StateResponse {
+                id: exec_id.into(),
+                pid: pid.unwrap_or_default(),
+                exit_status: exit_code.unwrap_or_default(),
+                exited_at: timestamp.into(),
+                status: status.into(),
+                ..Default::default()
+            });
         }
 
-        let i = self.get_instance(req.id()).await?;
         let pid = i.pid();
         let (exit_code, timestamp) = i.wait().now_or_never().unzip();
         let timestamp = timestamp.map(ToTimestamp::to_timestamp);
@@ -376,6 +476,33 @@ impl<T: Instance + Send + Sync, E: EventSender> Local<T, E> {
             ..Default::default()
         })
     }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Debug"))]
+    async fn task_exec(&self, req: ExecProcessRequest) -> Result<Empty> {
+        if req.terminal {
+            return Err(ShimError::Unimplemented("terminal is not supported".to_string()).into());
+        }
+
+        let container_id = req.id().to_string();
+        let exec_id = req.exec_id().to_string();
+        let cfg = ExecConfig {
+            stdin: req.stdin.as_str().into(),
+            stdout: req.stdout.as_str().into(),
+            stderr: req.stderr.as_str().into(),
+            spec: req.spec.into_option().map(|a| a.value).unwrap_or_default(),
+        };
+
+        let i = self.get_instance(&container_id).await?;
+        i.register_exec(exec_id.clone(), cfg).await?;
+
+        self.events.send(TaskExecAdded {
+            container_id,
+            exec_id,
+            ..Default::default()
+        });
+
+        Ok(Empty::new())
+    }
 }
 
 impl<T: Instance + Sync + Send, E: EventSender> Task for Local<T, E> {
@@ -391,6 +518,16 @@ impl<T: Instance + Sync + Send, E: EventSender> Task for Local<T, E> {
         tracing::Span::current().set_parent(extract_context(&_ctx.metadata));
 
         Ok(self.task_create(req).block_on()?)
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]
+    fn exec(&self, _ctx: &TtrpcContext, req: ExecProcessRequest) -> TtrpcResult<Empty> {
+        debug!("exec: {:?}", req);
+
+        #[cfg(feature = "opentelemetry")]
+        tracing::Span::current().set_parent(extract_context(&_ctx.metadata));
+
+        Ok(self.task_exec(req).block_on()?)
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]

@@ -8,6 +8,19 @@ use serde::{Deserialize, Serialize};
 use super::error::Error;
 use crate::sandbox::shim::Config;
 
+/// Configuration for an exec sub-process inside a running container.
+#[derive(Clone, Debug, Default)]
+pub struct ExecConfig {
+    /// Optional stdin named pipe path.
+    pub stdin: PathBuf,
+    /// Optional stdout named pipe path.
+    pub stdout: PathBuf,
+    /// Optional stderr named pipe path.
+    pub stderr: PathBuf,
+    /// OCI Process spec as raw JSON bytes.
+    pub spec: Vec<u8>,
+}
+
 /// Generic options builder for creating a wasm instance.
 /// This is passed to the `Instance::new` method.
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -54,4 +67,23 @@ pub trait Instance: 'static {
     /// Waits for the instance to finish and returns its exit code
     /// This is an async call.
     async fn wait(&self) -> (u32, DateTime<Utc>);
+
+    /// Register a sub-process inside the container.
+    /// Called when the Exec RPC is received.
+    async fn register_exec(&self, exec_id: String, cfg: ExecConfig) -> Result<(), Error>;
+
+    /// Start a previously registered sub-process.  Returns the sub-process PID.
+    async fn start_exec(&self, exec_id: &str) -> Result<u32, Error>;
+
+    /// Send a signal to a running sub-process.
+    async fn kill_exec(&self, exec_id: &str, signal: u32) -> Result<(), Error>;
+
+    /// Wait for a sub-process to finish, returning its exit code and timestamp.
+    async fn wait_exec(&self, exec_id: &str) -> Result<(u32, DateTime<Utc>), Error>;
+
+    /// Delete a finished sub-process and clean up its resources.
+    async fn delete_exec(&self, exec_id: &str) -> Result<(), Error>;
+
+    /// Return the PID of a registered sub-process, or None if not yet started.
+    async fn exec_pid(&self, exec_id: &str) -> Result<Option<u32>, Error>;
 }

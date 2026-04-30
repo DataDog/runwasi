@@ -1,8 +1,9 @@
 use std::marker::PhantomData;
 
 use chrono::{DateTime, Utc};
+use containerd_shim::error::Error as ShimError;
 use containerd_shimkit::sandbox::{
-    Error as SandboxError, Instance as SandboxInstance, InstanceConfig,
+    Error as SandboxError, ExecConfig, Instance as SandboxInstance, InstanceConfig,
 };
 
 use crate::shim::Shim;
@@ -37,5 +38,41 @@ impl<S: Shim> SandboxInstance for Instance<S> {
     /// This is an async call.
     async fn wait(&self) -> (u32, DateTime<Utc>) {
         todo!();
+    }
+
+    async fn register_exec(&self, _exec_id: String, _cfg: ExecConfig) -> Result<(), SandboxError> {
+        Err(SandboxError::Shim(ShimError::Unimplemented(
+            "exec is not supported on Windows".to_string(),
+        )))
+    }
+
+    async fn start_exec(&self, _exec_id: &str) -> Result<u32, SandboxError> {
+        Err(SandboxError::Shim(ShimError::Unimplemented(
+            "exec is not supported on Windows".to_string(),
+        )))
+    }
+
+    async fn kill_exec(&self, _exec_id: &str, _signal: u32) -> Result<(), SandboxError> {
+        Err(SandboxError::Shim(ShimError::Unimplemented(
+            "exec is not supported on Windows".to_string(),
+        )))
+    }
+
+    async fn wait_exec(&self, _exec_id: &str) -> Result<(u32, DateTime<Utc>), SandboxError> {
+        Err(SandboxError::Shim(ShimError::Unimplemented(
+            "exec is not supported on Windows".to_string(),
+        )))
+    }
+
+    async fn delete_exec(&self, _exec_id: &str) -> Result<(), SandboxError> {
+        Err(SandboxError::Shim(ShimError::Unimplemented(
+            "exec is not supported on Windows".to_string(),
+        )))
+    }
+
+    async fn exec_pid(&self, _exec_id: &str) -> Result<Option<u32>, SandboxError> {
+        Err(SandboxError::Shim(ShimError::Unimplemented(
+            "exec is not supported on Windows".to_string(),
+        )))
     }
 }
