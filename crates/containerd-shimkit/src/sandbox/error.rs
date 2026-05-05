@@ -82,6 +82,20 @@ impl From<Error> for ttrpc::Error {
             Error::Any(ref s) => {
                 ttrpc::Error::RpcStatus(ttrpc::get_status(ttrpc::Code::UNKNOWN, s))
             }
+            #[cfg(unix)]
+            Error::Errno(ref errno) => match *errno {
+                nix::errno::Errno::ESRCH => ttrpc::Error::RpcStatus(ttrpc::get_status(
+                    ttrpc::Code::NOT_FOUND,
+                    e.to_string(),
+                )),
+                nix::errno::Errno::EINVAL => ttrpc::Error::RpcStatus(ttrpc::get_status(
+                    ttrpc::Code::INVALID_ARGUMENT,
+                    e.to_string(),
+                )),
+                _ => {
+                    ttrpc::Error::RpcStatus(ttrpc::get_status(ttrpc::Code::UNKNOWN, e.to_string()))
+                }
+            },
             _ => ttrpc::Error::Others(e.to_string()),
         }
     }
