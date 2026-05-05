@@ -47,12 +47,15 @@ pub struct ExecTenantArgs {
     pub stderr: Option<PathBuf>,
 }
 
-/// Reject IDs that could escape a path component: no `/`, `..`, null bytes, or non-ASCII.
+/// Accept only alphanumeric, `-`, and `_` — allowlist is safer than denylist for path components.
 fn validate_id(id: &str) -> anyhow::Result<()> {
-    if id.is_empty() || id.contains('/') || id.contains('\0') || id.contains("..") || !id.is_ascii()
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         anyhow::bail!(
-            "invalid id {:?}: must be non-empty ASCII without '/', '..' or null bytes",
+            "invalid id {:?}: must be non-empty and contain only [a-zA-Z0-9_-]",
             id
         );
     }
@@ -80,7 +83,7 @@ impl Container {
                     .tempfile_in(&dir)?;
                 spec_file.write_all(&args.spec)?;
                 spec_file.flush()?;
-                let spec_path = spec_file.path().to_owned();
+                let (_, spec_path) = spec_file.keep()?;
 
                 let open_stdin = |p: &PathBuf| -> Option<OwnedFd> {
                     let _unblock = std::fs::OpenOptions::new()
@@ -131,6 +134,7 @@ impl Container {
                     .build()
                     .map_err(|e| anyhow!(e))?;
 
+                let _ = std::fs::remove_file(&spec_path);
                 Ok(pid.as_raw())
             },
             args,
@@ -186,9 +190,9 @@ impl<S: Shim> Instance<S> {
             exec_id: exec_id.to_string(),
             root_path: self.root_path.clone(),
             spec: cfg.spec,
-            stdin: (!cfg.stdin.as_os_str().is_empty()).then(|| cfg.stdin),
-            stdout: (!cfg.stdout.as_os_str().is_empty()).then(|| cfg.stdout),
-            stderr: (!cfg.stderr.as_os_str().is_empty()).then(|| cfg.stderr),
+            stdin: cfg.stdin,
+            stdout: cfg.stdout,
+            stderr: cfg.stderr,
         };
 
         let pid_raw = self

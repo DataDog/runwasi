@@ -41,38 +41,26 @@ impl<S: Shim> SandboxInstance for Instance<S> {
     }
 
     async fn register_exec(&self, _exec_id: String, _cfg: ExecConfig) -> Result<(), SandboxError> {
-        Err(SandboxError::Shim(ShimError::Unimplemented(
-            "exec is not supported on Windows".to_string(),
-        )))
+        todo!()
     }
 
     async fn start_exec(&self, _exec_id: &str) -> Result<u32, SandboxError> {
-        Err(SandboxError::Shim(ShimError::Unimplemented(
-            "exec is not supported on Windows".to_string(),
-        )))
+        todo!()
     }
 
     async fn kill_exec(&self, _exec_id: &str, _signal: u32) -> Result<(), SandboxError> {
-        Err(SandboxError::Shim(ShimError::Unimplemented(
-            "exec is not supported on Windows".to_string(),
-        )))
+        todo!()
     }
 
     async fn wait_exec(&self, _exec_id: &str) -> Result<(u32, DateTime<Utc>), SandboxError> {
-        Err(SandboxError::Shim(ShimError::Unimplemented(
-            "exec is not supported on Windows".to_string(),
-        )))
+        todo!()
     }
 
     async fn delete_exec(&self, _exec_id: &str) -> Result<(), SandboxError> {
-        Err(SandboxError::Shim(ShimError::Unimplemented(
-            "exec is not supported on Windows".to_string(),
-        )))
+        todo!()
     }
 
     async fn exec_pid(&self, _exec_id: &str) -> Result<Option<u32>, SandboxError> {
-        Err(SandboxError::Shim(ShimError::Unimplemented(
-            "exec is not supported on Windows".to_string(),
-        )))
+        todo!()
     }
 }

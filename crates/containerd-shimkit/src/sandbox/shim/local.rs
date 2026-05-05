@@ -485,10 +485,12 @@ impl<T: Instance + Send + Sync, E: EventSender> Local<T, E> {
 
         let container_id = req.id().to_string();
         let exec_id = req.exec_id().to_string();
+        let non_empty =
+            |s: &str| -> Option<std::path::PathBuf> { (!s.is_empty()).then(|| s.into()) };
         let cfg = ExecConfig {
-            stdin: req.stdin.as_str().into(),
-            stdout: req.stdout.as_str().into(),
-            stderr: req.stderr.as_str().into(),
+            stdin: non_empty(req.stdin.as_str()),
+            stdout: non_empty(req.stdout.as_str()),
+            stderr: non_empty(req.stderr.as_str()),
             spec: req.spec.into_option().map(|a| a.value).unwrap_or_default(),
         };
 

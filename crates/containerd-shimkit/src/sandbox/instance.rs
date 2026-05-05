@@ -11,12 +11,9 @@ use crate::sandbox::shim::Config;
 /// Configuration for an exec sub-process inside a running container.
 #[derive(Clone, Debug, Default)]
 pub struct ExecConfig {
-    /// Optional stdin named pipe path.
-    pub stdin: PathBuf,
-    /// Optional stdout named pipe path.
-    pub stdout: PathBuf,
-    /// Optional stderr named pipe path.
-    pub stderr: PathBuf,
+    pub stdin: Option<PathBuf>,
+    pub stdout: Option<PathBuf>,
+    pub stderr: Option<PathBuf>,
     /// OCI Process spec as raw JSON bytes.
     pub spec: Vec<u8>,
 }
