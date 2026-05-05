@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{OnceCell, RwLock};
 
 use crate::sandbox::shim::task_state::TaskState;
-use crate::sandbox::{Instance, InstanceConfig, Result};
+use crate::sandbox::{ExecConfig, Instance, InstanceConfig, Result};
 
 pub(super) struct InstanceData<T: Instance> {
     pub instance: T,
@@ -81,5 +81,29 @@ impl<T: Instance> InstanceData<T> {
         let mut s = self.state.write().await;
         *s = TaskState::Exited;
         res
+    }
+
+    pub async fn register_exec(&self, exec_id: String, cfg: ExecConfig) -> Result<()> {
+        self.instance.register_exec(exec_id, cfg).await
+    }
+
+    pub async fn start_exec(&self, exec_id: &str) -> Result<u32> {
+        self.instance.start_exec(exec_id).await
+    }
+
+    pub async fn kill_exec(&self, exec_id: &str, signal: u32) -> Result<()> {
+        self.instance.kill_exec(exec_id, signal).await
+    }
+
+    pub async fn wait_exec(&self, exec_id: &str) -> Result<(u32, DateTime<Utc>)> {
+        self.instance.wait_exec(exec_id).await
+    }
+
+    pub async fn delete_exec(&self, exec_id: &str) -> Result<()> {
+        self.instance.delete_exec(exec_id).await
+    }
+
+    pub async fn exec_pid(&self, exec_id: &str) -> Result<Option<u32>> {
+        self.instance.exec_pid(exec_id).await
     }
 }

@@ -57,7 +57,7 @@ impl Container {
 }
 
 impl Container {
-    fn run_impl<
+    pub(super) fn run_impl<
         Arg: Serialize + DeserializeOwned + 'static,
         T: Serialize + DeserializeOwned + 'static,
     >(
