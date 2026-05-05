@@ -1,19 +1,22 @@
+use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use containerd_client::tonic::async_trait;
 use containerd_shimkit::sandbox::sync::WaitableCell;
 use containerd_shimkit::sandbox::{
-    Error as SandboxError, Instance as SandboxInstance, InstanceConfig,
+    Error as SandboxError, ExecConfig, Instance as SandboxInstance, InstanceConfig,
 };
 use containerd_shimkit::set_logger_kv;
 use libcontainer::container::builder::ContainerBuilder;
 use libcontainer::syscall::syscall::SyscallType;
 use nix::sys::wait::WaitStatus;
 use oci_spec::runtime::Spec;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 
 use super::container::Container;
+use super::exec::ExecState;
 use crate::containerd;
 use crate::sandbox::context::WasmLayer;
 use crate::shim::{Compiler, Shim};
@@ -21,9 +24,12 @@ use crate::sys::container::executor::Executor;
 use crate::sys::pid_fd::PidFd;
 
 pub struct Instance<S: Shim> {
-    exit_code: WaitableCell<(u32, DateTime<Utc>)>,
-    container: Container,
-    id: String,
+    pub(super) exit_code: WaitableCell<(u32, DateTime<Utc>)>,
+    pub(super) container: Container,
+    pub(super) id: String,
+    pub(super) root_path: PathBuf,
+    pub(super) is_wasm: bool,
+    pub(super) exec_processes: RwLock<HashMap<String, ExecState>>,
     _phantom: PhantomData<S>,
 }
 
@@ -87,6 +93,8 @@ impl<S: Shim> SandboxInstance for Instance<S> {
                 vec![]
             });
 
+        let is_wasm = !modules.is_empty();
+
         let container = Container::build(
             |(id, cfg, modules)| {
                 let source_spec_path = cfg.bundle.join("config.json");
@@ -129,6 +137,9 @@ impl<S: Shim> SandboxInstance for Instance<S> {
             id,
             exit_code: WaitableCell::new(),
             container,
+            root_path: cfg.determine_rootdir(S::name())?,
+            is_wasm,
+            exec_processes: RwLock::default(),
             _phantom: Default::default(),
         })
     }
@@ -150,27 +161,7 @@ impl<S: Shim> SandboxInstance for Instance<S> {
         let pidfd = PidFd::new(pid)?;
 
         self.container.start()?;
-
-        let exit_code = self.exit_code.clone();
-        tokio::spawn(async move {
-            // move the exit code guard into this task
-            let _guard = guard;
-
-            let status = match pidfd.wait().await {
-                Ok(WaitStatus::Exited(_, status)) => status,
-                Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
-                Ok(res) => {
-                    log::error!("waitpid unexpected result: {res:?}");
-                    137
-                }
-                Err(e) => {
-                    log::error!("waitpid failed: {e}");
-                    137
-                }
-            } as u32;
-            let _ = exit_code.set((status, Utc::now()));
-        });
-
+        spawn_exit_waiter(pidfd, guard, self.exit_code.clone());
         Ok(pid as _)
     }
 
@@ -198,6 +189,36 @@ impl<S: Shim> SandboxInstance for Instance<S> {
     async fn wait(&self) -> (u32, DateTime<Utc>) {
         *self.exit_code.wait().await
     }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]
+    async fn register_exec(&self, exec_id: String, cfg: ExecConfig) -> Result<(), SandboxError> {
+        self.exec_register(exec_id, cfg).await
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]
+    async fn start_exec(&self, exec_id: &str) -> Result<u32, SandboxError> {
+        self.exec_start(exec_id).await
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]
+    async fn kill_exec(&self, exec_id: &str, signal: u32) -> Result<(), SandboxError> {
+        self.exec_kill(exec_id, signal).await
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]
+    async fn wait_exec(&self, exec_id: &str) -> Result<(u32, DateTime<Utc>), SandboxError> {
+        self.exec_wait(exec_id).await
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]
+    async fn delete_exec(&self, exec_id: &str) -> Result<(), SandboxError> {
+        self.exec_delete(exec_id).await
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip(self), level = "Info"))]
+    async fn exec_pid(&self, exec_id: &str) -> Result<Option<u32>, SandboxError> {
+        self.exec_pid_get(exec_id).await
+    }
 }
 
 fn pod_id(spec: &Spec) -> Option<&str> {
@@ -205,6 +226,29 @@ fn pod_id(spec: &Spec) -> Option<&str> {
         .as_ref()
         .and_then(|a| a.get("io.kubernetes.cri.sandbox-id"))
         .map(|s| s.as_str())
+}
+
+pub(super) fn spawn_exit_waiter<G: Send + 'static>(
+    pidfd: PidFd,
+    guard: G,
+    exit_code: WaitableCell<(u32, DateTime<Utc>)>,
+) {
+    tokio::spawn(async move {
+        let _guard = guard;
+        let status = match pidfd.wait().await {
+            Ok(WaitStatus::Exited(_, s)) => s,
+            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+            Ok(res) => {
+                log::error!("waitpid unexpected result: {res:?}");
+                137
+            }
+            Err(e) => {
+                log::error!("waitpid failed: {e}");
+                137
+            }
+        } as u32;
+        let _ = exit_code.set((status, Utc::now()));
+    });
 }
 
 #[cfg(test)]
