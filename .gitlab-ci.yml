@@ -24,8 +24,7 @@ ci-image:
   variables:
     IMAGE_NAME: "$CI_PROJECT_NAME/ci"
     IMAGE_TAG: $CI_IMAGE
-    CONTEXT_DIR: "."
-    DOCKERFILE: "./ci/Dockerfile"
+    CONTEXT_DIR: "./ci"
     TARGET: "build"
 
 lint:
