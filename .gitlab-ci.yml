@@ -46,7 +46,6 @@ build-common:
   tags: [ "arch:amd64" ]
   script:
     - make build-common
-    # - make publish-check - no crate publish
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
