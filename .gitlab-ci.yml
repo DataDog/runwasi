@@ -1,0 +1,104 @@
+include: https://gitlab-templates.ddbuild.io/compute-delivery/v3/compute-delivery.yml
+
+variables:
+  CI_IMAGE: 1
+  CARGO_TERM_COLOR: "always"
+  OPT_PROFILE: "release"
+  KUBERNETES_CPU_REQUEST: "8"
+  KUBERNETES_MEMORY_REQUEST: "16Gi"
+  KUBERNETES_MEMORY_LIMIT: "32Gi"
+
+stages:
+  - ci-image
+  - lint
+  - build
+  - publish
+  - notify
+
+ci-image:
+  stage: ci-image
+  extends: .build-docker-image
+  when: manual
+  only:
+    - branches
+  variables:
+    IMAGE_NAME: "$CI_PROJECT_NAME/ci"
+    IMAGE_TAG: $CI_IMAGE
+    CONTEXT_DIR: "./ci"
+    TARGET: "build"
+
+lint:
+  image: registry.ddbuild.io/$CI_PROJECT_NAME/ci:$CI_IMAGE
+  stage: lint
+  tags: [ "arch:amd64" ]
+  parallel:
+    matrix:
+      - RUNTIME: [common, wasmedge, wasmtime, wasmer]
+  script:
+    - make check-${RUNTIME}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+build-common:
+  image: registry.ddbuild.io/$CI_PROJECT_NAME/ci:$CI_IMAGE
+  stage: build
+  tags: [ "arch:amd64" ]
+  script:
+    - make build-common
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+build:
+  image: registry.ddbuild.io/$CI_PROJECT_NAME/ci:$CI_IMAGE
+  stage: build
+  tags: [ "arch:${ARCH}" ]
+  parallel:
+    matrix:
+      - RUNTIME: [wasmtime, wasmedge, wasmer]
+        ARCH: [amd64, arm64]
+  script:
+    - |
+      if [ -n "${CI_COMMIT_TAG}" ]; then
+        TAG_RUNTIME=$(echo "${CI_COMMIT_TAG}" | sed 's|containerd-shim-\([^/]*\)/.*|\1|')
+        [ "${RUNTIME}" != "${TAG_RUNTIME}" ] && { echo "Skipping ${RUNTIME}: tag targets ${TAG_RUNTIME}"; exit 0; }
+      fi
+    - make build-${RUNTIME}
+    - make dist-${RUNTIME}
+    - tar -czf dist/containerd-shim-${RUNTIME}-$(uname -m)-linux-gnu.tar.gz -C dist/bin .
+  artifacts:
+    paths:
+      - dist/containerd-shim-${RUNTIME}-*-linux-gnu.tar.gz
+    expire_in: 1 week
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG =~ /^containerd-shim-[^\/]+\/v\d+.*-dd\.\d+$/'
+
+# publish: tag-only (e.g. containerd-shim-wasmedge/v0.6.0-dd.1)
+publish:
+  image: registry.ddbuild.io/$CI_PROJECT_NAME/ci:$CI_IMAGE
+  stage: publish
+  only:
+    - /^containerd-shim-[^\/]+\/v\d+.*-dd\.\d+$/
+  tags: [ "arch:amd64" ]
+  id_tokens:
+    DDOCTOSTS_ID_TOKEN:
+      aud: dd-octo-sts
+  variables:
+    GIT_STRATEGY: none
+  dependencies:
+    - build
+  before_script:
+    - dd-octo-sts version
+    - dd-octo-sts token --scope "DataDog/${CI_PROJECT_NAME}" --policy compute-delivery > /tmp/gh_token.txt
+    - export GITHUB_TOKEN="$(< /tmp/gh_token.txt)"
+  script:
+    - |
+      RUNTIME=$(echo "${CI_COMMIT_TAG}" | sed 's|containerd-shim-\([^/]*\)/.*|\1|')
+      gh release create "${CI_COMMIT_TAG}" --repo "${GITHUB_REPOSITORY}" --title "${CI_COMMIT_TAG}" --draft
+      for file in dist/containerd-shim-${RUNTIME}-*-linux-gnu.tar.gz; do
+        gh release upload "${CI_COMMIT_TAG}" "$file"
+      done
+      gh release edit "${CI_COMMIT_TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false
