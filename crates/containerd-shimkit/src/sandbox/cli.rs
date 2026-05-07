@@ -97,9 +97,12 @@
 //! - `OTEL_SDK_DISABLED`: Disable OpenTelemetry SDK
 //!
 
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use containerd_shim::{Config, parse, run};
+use containerd_shim::protos::protobuf::{Message, MessageField};
+use containerd_shim::protos::types::introspection;
 
 #[cfg(feature = "opentelemetry")]
 use crate::sandbox::async_utils::AmbientRuntime as _;
@@ -239,10 +242,26 @@ where
 
     // Initialize the zygote and logger for the container process
     #[cfg(unix)]
-    {
+    if !flags.info {
         let default_config = Config::default();
         let config = config.as_ref().unwrap_or(&default_config);
         init_zygote_and_logger(flags.debug, config);
+    }
+
+    // Handle -info
+    if flags.info {
+        let info = introspection::RuntimeInfo {
+            name: name.to_string(),
+            version: MessageField::some(introspection::RuntimeVersion {
+                version: version.version.to_string(),
+                revision: version.revision.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let bytes = info.write_to_bytes().expect("failed to serialize RuntimeInfo");
+        std::io::stdout().write_all(&bytes).expect("failed to write RuntimeInfo");
+        return;
     }
 
     #[cfg(feature = "opentelemetry")]
