@@ -1,0 +1,6 @@
+issuer: https://gitlab.ddbuild.io
+
+subject_pattern: "project_path:DataDog/runwasi:ref_type:(branch|tag):ref:(master|containerd-shim-[^/]+/v.+)"
+
+permissions:
+  contents: write
