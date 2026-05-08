@@ -92,6 +92,7 @@ publish:
     - build
   before_script:
     - dd-octo-sts version
+    - dd-octo-sts debug --scope "DataDog/${CI_PROJECT_NAME}" --policy compute-delivery
     - dd-octo-sts token --scope "DataDog/${CI_PROJECT_NAME}" --policy compute-delivery > /tmp/gh_token.txt
     - export GITHUB_TOKEN="$(< /tmp/gh_token.txt)"
   script:
