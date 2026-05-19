@@ -74,19 +74,26 @@ impl<S: Shim> LibcontainerExecutor for Executor<S> {
         }
     }
 
-    // This is an no-op for the Wasm `Executor`. Instead of youki's libcontainer setting the envs
-    // in the shim process, the shim will manage the envs itself. The expectation is that the shim will
-    // call `RuntimeContext::envs()` to get the container's envs and set them in the `Engine::run_wasi`
-    // function. This way, the shim can decide how to pass the envs to the WASI context.
+    // For Wasm containers this is a no-op: the shim manages envs itself by
+    // calling `RuntimeContext::envs()` inside `Engine::run_wasi`, so youki
+    // must not clear the process environment before the shim has a chance to
+    // read it.  See https://github.com/containerd/runwasi/issues/619 and
+    // https://github.com/containers/youki/issues/2815.
     //
-    // See the following issues for more context:
-    // https://github.com/containerd/runwasi/issues/619
-    // https://github.com/containers/youki/issues/2815
+    // For Linux containers we delegate to `DefaultExecutor`, which clears the
+    // host envs and sets the container envs from the OCI spec — the same
+    // behaviour the default youki executor provides.  Without this, a Linux
+    // container inherits the shim's environment instead of its own.
+    //
+    // `validate` always runs before `setup_envs`, so `ty` is already set.
     fn setup_envs(
         &self,
-        _: HashMap<String, String>,
+        envs: HashMap<String, String>,
     ) -> std::result::Result<(), ExecutorSetEnvsError> {
-        Ok(())
+        match self.0.ty.get() {
+            Some(ExecutorType::Linux) => DefaultExecutor {}.setup_envs(envs),
+            _ => Ok(()),
+        }
     }
 }
 
