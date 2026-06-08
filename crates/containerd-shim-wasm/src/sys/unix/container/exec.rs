@@ -112,20 +112,20 @@ impl Container {
                 let mut builder = ContainerBuilder::new(args.container_id, SyscallType::Linux)
                     .with_root_path(&args.root_path)
                     .map_err(|e| anyhow!(e))?;
-                if let Some(p) = args.stdin {
-                    if let Some(f) = open_stdin(&p) {
-                        builder = builder.with_stdin(f);
-                    }
+                if let Some(p) = args.stdin
+                    && let Some(f) = open_stdin(&p)
+                {
+                    builder = builder.with_stdin(f);
                 }
-                if let Some(p) = args.stdout {
-                    if let Some(f) = open_output(&p) {
-                        builder = builder.with_stdout(f);
-                    }
+                if let Some(p) = args.stdout
+                    && let Some(f) = open_output(&p)
+                {
+                    builder = builder.with_stdout(f);
                 }
-                if let Some(p) = args.stderr {
-                    if let Some(f) = open_output(&p) {
-                        builder = builder.with_stderr(f);
-                    }
+                if let Some(p) = args.stderr
+                    && let Some(f) = open_output(&p)
+                {
+                    builder = builder.with_stderr(f);
                 }
                 let pid = builder
                     .as_tenant()
