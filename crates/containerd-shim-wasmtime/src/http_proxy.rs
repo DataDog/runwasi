@@ -1,6 +1,7 @@
 // Heavily inspired by wasmtime serve command:
 // https://github.com/bytecodealliance/wasmtime/blob/main/src/commands/serve.rs
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -14,14 +15,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use wasmtime::Store;
-use wasmtime::component::ResourceTable;
+use wasmtime_wasi_http::WasiHttpView;
 use wasmtime_wasi_http::bindings::ProxyPre;
 use wasmtime_wasi_http::bindings::http::types::Scheme;
 use wasmtime_wasi_http::body::HyperOutgoingBody;
 use wasmtime_wasi_http::io::TokioIo;
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
-use crate::instance::{WasiPreview2Ctx, envs_from_ctx};
+use crate::capabilities::CapabilityStore;
+use crate::instance::envs_from_ctx;
 
 const DEFAULT_ADDR: SocketAddr =
     SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)), 8080);
@@ -66,8 +67,9 @@ async fn tcp_accept(listener: &TcpListener) -> Option<TcpStream> {
 
 pub(crate) async fn serve_conn(
     ctx: &impl RuntimeContext,
-    instance: ProxyPre<WasiPreview2Ctx>,
+    instance: ProxyPre<CapabilityStore>,
     cancel: CancellationToken,
+    shared_extensions: HashMap<String, Arc<dyn Any + Send + Sync>>,
 ) -> Result<()> {
     let mut env = envs_from_ctx(ctx).into_iter().collect::<HashMap<_, _>>();
 
@@ -103,7 +105,7 @@ pub(crate) async fn serve_conn(
     log::info!("Serving HTTP on http://{}/", listener.local_addr()?);
 
     let env = env.into_iter().collect();
-    let handler = Arc::new(ProxyHandler::new(instance, env, tracker.clone()));
+    let handler = Arc::new(ProxyHandler::new(instance, env, tracker.clone(), shared_extensions));
 
     loop {
         let stream = tokio::select! {
@@ -142,40 +144,40 @@ pub(crate) async fn serve_conn(
 }
 
 struct ProxyHandler {
-    instance_pre: ProxyPre<WasiPreview2Ctx>,
+    instance_pre: ProxyPre<CapabilityStore>,
     next_id: AtomicU64,
     env: Vec<(String, String)>,
     tracker: TaskTracker,
+    shared_extensions: HashMap<String, Arc<dyn Any + Send + Sync>>,
 }
 
 impl ProxyHandler {
     fn new(
-        instance_pre: ProxyPre<WasiPreview2Ctx>,
+        instance_pre: ProxyPre<CapabilityStore>,
         env: Vec<(String, String)>,
         tracker: TaskTracker,
+        shared_extensions: HashMap<String, Arc<dyn Any + Send + Sync>>,
     ) -> Self {
         ProxyHandler {
             instance_pre,
             env,
             tracker,
             next_id: AtomicU64::from(0),
+            shared_extensions,
         }
     }
 
-    fn wasi_store_for_request(&self, req_id: u64) -> Store<WasiPreview2Ctx> {
+    fn wasi_store_for_request(&self, req_id: u64) -> Store<CapabilityStore> {
         let engine = self.instance_pre.engine();
         let mut builder = wasmtime_wasi::WasiCtxBuilder::new();
 
         builder.envs(&self.env);
         builder.env("REQUEST_ID", req_id.to_string());
 
-        let ctx = WasiPreview2Ctx {
-            wasi_ctx: builder.build(),
-            wasi_http: WasiHttpCtx::new(),
-            resource_table: ResourceTable::default(),
-        };
-
-        Store::new(engine, ctx)
+        Store::new(
+            engine,
+            CapabilityStore::with_extensions(builder.build(), self.shared_extensions.clone()),
+        )
     }
 
     async fn handle_request(
