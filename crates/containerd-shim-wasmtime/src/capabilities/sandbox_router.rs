@@ -3,9 +3,8 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
-use wasmtime::Engine;
-use wasmtime::Store;
 use wasmtime::component::{self, Component, ComponentType, Lift, Lower, ResourceTable};
+use wasmtime::{Engine, Store};
 use wasmtime_wasi::p2::bindings::Command;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -80,7 +79,10 @@ async fn host_add_module(
 ) -> Result<(String,)> {
     {
         if state.denied.read().unwrap().contains(&name) {
-            log::warn!("module '{}': blocked (explicitly unloaded); call allow-module to re-enable", name);
+            log::warn!(
+                "module '{}': blocked (explicitly unloaded); call allow-module to re-enable",
+                name
+            );
             return Ok((String::new(),));
         }
     }
@@ -349,7 +351,10 @@ async fn run_component_server(
     if perms.stdio {
         // ignore for now, this intentional
     }
-    builder.allow_tcp(true).inherit_network().allow_ip_name_lookup(true);
+    builder
+        .allow_tcp(true)
+        .inherit_network()
+        .allow_ip_name_lookup(true);
     if perms.network {
         // ignore for now, this intentional
     }

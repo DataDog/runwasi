@@ -353,7 +353,8 @@ impl WasmtimeSandbox {
                 Some(Precompiled::Component) => {
                     log::info!("using precompiled component");
                     let component = unsafe { Component::deserialize(&self.engine, wasm_binary) }?;
-                    self.execute_component(ctx, component, func, &registry).await
+                    self.execute_component(ctx, component, func, &registry)
+                        .await
                 }
                 None => {
                     bail!("invalid precompiled module")
@@ -368,7 +369,8 @@ impl WasmtimeSandbox {
                 }
                 Some(WasmBinaryType::Component) => {
                     let component = Component::from_binary(&self.engine, wasm_binary)?;
-                    self.execute_component(ctx, component, func, &registry).await
+                    self.execute_component(ctx, component, func, &registry)
+                        .await
                 }
                 None => {
                     bail!("invalid wasm module")

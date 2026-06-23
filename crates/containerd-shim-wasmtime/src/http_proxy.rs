@@ -105,7 +105,12 @@ pub(crate) async fn serve_conn(
     log::info!("Serving HTTP on http://{}/", listener.local_addr()?);
 
     let env = env.into_iter().collect();
-    let handler = Arc::new(ProxyHandler::new(instance, env, tracker.clone(), shared_extensions));
+    let handler = Arc::new(ProxyHandler::new(
+        instance,
+        env,
+        tracker.clone(),
+        shared_extensions,
+    ));
 
     loop {
         let stream = tokio::select! {

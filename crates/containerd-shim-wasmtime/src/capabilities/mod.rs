@@ -31,7 +31,10 @@ impl CapabilityStore {
         }
     }
 
-    pub fn with_extensions(wasi: WasiCtx, extensions: HashMap<String, Arc<dyn Any + Send + Sync>>) -> Self {
+    pub fn with_extensions(
+        wasi: WasiCtx,
+        extensions: HashMap<String, Arc<dyn Any + Send + Sync>>,
+    ) -> Self {
         Self {
             wasi,
             wasi_http: WasiHttpCtx::new(),
@@ -96,9 +99,8 @@ where
         let iface = iface.clone();
         let f = f.clone();
         Box::new(async move {
-            let state = state.ok_or_else(|| {
-                anyhow::anyhow!("capability '{iface}' not initialized in store")
-            })?;
+            let state = state
+                .ok_or_else(|| anyhow::anyhow!("capability '{iface}' not initialized in store"))?;
             f(state, params).await
         })
     }
