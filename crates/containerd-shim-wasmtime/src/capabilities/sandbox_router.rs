@@ -137,22 +137,9 @@ async fn host_add_module(
         let name = name.clone();
         let addr = addr.clone();
         let cancel = module_cancel.clone();
-        let max_restarts = config.max_module_restarts;
-        let backoff_initial = config.restart_backoff_initial_ms;
-        let max_backoff = config.max_restart_backoff_ms;
+        let config = config.clone();
         async move {
-            run_module_server(
-                engine,
-                component,
-                name,
-                addr,
-                cancel,
-                perms,
-                max_restarts,
-                backoff_initial,
-                max_backoff,
-            )
-            .await;
+            run_module_server(engine, component, name, addr, cancel, perms, config).await;
         }
     });
 
@@ -287,15 +274,17 @@ async fn run_module_server(
     addr: String,
     cancel: CancellationToken,
     perms: SandboxPermissions,
-    max_restarts: u32,
-    backoff_initial_ms: u64,
-    max_backoff_ms: u64,
+    config: Arc<SandboxRouterConfig>,
 ) {
     let mut linker: component::Linker<HandlerCtx> = component::Linker::new(&engine);
     if let Err(e) = wasmtime_wasi::p2::add_to_linker_async(&mut linker) {
         log::error!("module server '{name}': failed to build WASI linker: {e:#}");
         return;
     }
+
+    let max_restarts = config.max_module_restarts;
+    let backoff_initial_ms = config.restart_backoff_initial_ms;
+    let max_backoff_ms = config.max_restart_backoff_ms;
 
     let mut restarts = 0u32;
     loop {
