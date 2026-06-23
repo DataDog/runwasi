@@ -9,14 +9,14 @@ use containerd_shim_wasm::sandbox::context::{
 use containerd_shim_wasm::shim::{Compiler, Shim, Version, version};
 use tokio_util::sync::CancellationToken;
 use wasmtime::component::types::ComponentItem;
-use wasmtime::component::{self, Component, ResourceTable};
+use wasmtime::component::{self, Component};
 use wasmtime::{Config, Module, Precompiled, Store};
+use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p2::bindings::Command;
 use wasmtime_wasi::preview1::{self as wasi_preview1, WasiP1Ctx};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::bindings::ProxyPre;
-use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
+use crate::capabilities::{CapabilityRegistry, CapabilityStore};
 use crate::http_proxy::serve_conn;
 
 /// Represents the WASI API that the component is targeting.
@@ -83,43 +83,6 @@ impl Default for WasmtimeSandbox {
     }
 }
 
-pub struct WasiPreview2Ctx {
-    pub(crate) wasi_ctx: WasiCtx,
-    pub(crate) wasi_http: WasiHttpCtx,
-    pub(crate) resource_table: ResourceTable,
-}
-
-impl WasiPreview2Ctx {
-    pub fn new(ctx: &impl RuntimeContext) -> Result<Self> {
-        log::debug!("Creating new WasiPreview2Ctx");
-        Ok(Self {
-            wasi_ctx: wasi_builder(ctx)?.build(),
-            wasi_http: WasiHttpCtx::new(),
-            resource_table: ResourceTable::default(),
-        })
-    }
-}
-
-/// This impl is required to use wasmtime_wasi::WasiView trait.
-impl WasiView for WasiPreview2Ctx {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi_ctx,
-            table: &mut self.resource_table,
-        }
-    }
-}
-
-impl WasiHttpView for WasiPreview2Ctx {
-    fn ctx(&mut self) -> &mut wasmtime_wasi_http::WasiHttpCtx {
-        &mut self.wasi_http
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.resource_table
-    }
-}
-
 impl Shim for WasmtimeShim {
     fn name() -> &'static str {
         "wasmtime"
@@ -162,7 +125,9 @@ impl Sandbox for WasmtimeSandbox {
         let wasm_bytes = &source.as_bytes()?;
         let precompiled = source.is_precompiled()?;
 
-        self.execute(ctx, wasm_bytes, precompiled, func)
+        let registry = CapabilityRegistry::from_ctx(ctx, &self.engine, &self.cancel);
+
+        self.execute(ctx, wasm_bytes, precompiled, func, registry)
             .await
             .into_error_code()
     }
@@ -248,6 +213,7 @@ impl WasmtimeSandbox {
         ctx: &impl RuntimeContext,
         component: Component,
         func: String,
+        registry: &CapabilityRegistry,
     ) -> Result<i32> {
         log::info!("instantiating component");
 
@@ -260,9 +226,16 @@ impl WasmtimeSandbox {
         let status = match target {
             ComponentTarget::HttpProxy => {
                 log::info!("Found HTTP proxy target");
-                let mut linker = component::Linker::new(&self.engine);
+                let mut linker: component::Linker<CapabilityStore> =
+                    component::Linker::new(&self.engine);
                 wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
                 wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+                registry.register_linker(&mut linker)?;
+
+                // Init capability state once; Arc-based extensions are shared across all requests.
+                let mut template = CapabilityStore::new(WasiCtxBuilder::new().build());
+                registry.init_for_component(&component, &self.engine, &mut template)?;
+                let shared_extensions = template.into_extensions();
 
                 let pre = linker.instantiate_pre(&component)?;
                 log::info!("pre-instantiate_pre");
@@ -270,12 +243,19 @@ impl WasmtimeSandbox {
 
                 log::info!("starting HTTP server");
                 let cancel = self.cancel.clone();
-                serve_conn(ctx, instance, cancel).await
+                serve_conn(ctx, instance, cancel, shared_extensions).await
             }
             ComponentTarget::Command => {
                 log::info!("Found command target");
-                let wasi_ctx = WasiPreview2Ctx::new(ctx)?;
-                let (mut store, linker) = store_for_context(&self.engine, wasi_ctx)?;
+                let mut linker: component::Linker<CapabilityStore> =
+                    component::Linker::new(&self.engine);
+                wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+                wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+                registry.register_linker(&mut linker)?;
+
+                let mut store_data = CapabilityStore::new(wasi_builder(ctx)?.build());
+                registry.init_for_component(&component, &self.engine, &mut store_data)?;
+                let mut store = Store::new(&self.engine, store_data);
 
                 let command = Command::instantiate_async(&mut store, &component, &linker).await?;
 
@@ -291,8 +271,15 @@ impl WasmtimeSandbox {
             }
             ComponentTarget::Core(func) => {
                 log::info!("Found Core target");
-                let wasi_ctx = WasiPreview2Ctx::new(ctx)?;
-                let (mut store, linker) = store_for_context(&self.engine, wasi_ctx)?;
+                let mut linker: component::Linker<CapabilityStore> =
+                    component::Linker::new(&self.engine);
+                wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+                wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+                registry.register_linker(&mut linker)?;
+
+                let mut store_data = CapabilityStore::new(wasi_builder(ctx)?.build());
+                registry.init_for_component(&component, &self.engine, &mut store_data)?;
+                let mut store = Store::new(&self.engine, store_data);
 
                 let pre = linker.instantiate_pre(&component)?;
                 let instance = pre.instantiate_async(&mut store).await?;
@@ -319,10 +306,11 @@ impl WasmtimeSandbox {
         ctx: &impl RuntimeContext,
         component: Component,
         func: String,
+        registry: &CapabilityRegistry,
     ) -> Result<i32> {
         log::debug!("loading wasm component");
         tokio::select! {
-            status = self.execute_component_async(ctx, component, func) => {
+            status = self.execute_component_async(ctx, component, func, registry) => {
                 status
             }
             status = self.handle_signals() => {
@@ -353,6 +341,7 @@ impl WasmtimeSandbox {
         wasm_binary: &[u8],
         precompiled: bool,
         func: String,
+        registry: CapabilityRegistry,
     ) -> Result<i32> {
         if precompiled {
             match wasmtime::Engine::detect_precompiled(wasm_binary) {
@@ -364,7 +353,8 @@ impl WasmtimeSandbox {
                 Some(Precompiled::Component) => {
                     log::info!("using precompiled component");
                     let component = unsafe { Component::deserialize(&self.engine, wasm_binary) }?;
-                    self.execute_component(ctx, component, func).await
+                    self.execute_component(ctx, component, func, &registry)
+                        .await
                 }
                 None => {
                     bail!("invalid precompiled module")
@@ -379,7 +369,8 @@ impl WasmtimeSandbox {
                 }
                 Some(WasmBinaryType::Component) => {
                     let component = Component::from_binary(&self.engine, wasm_binary)?;
-                    self.execute_component(ctx, component, func).await
+                    self.execute_component(ctx, component, func, &registry)
+                        .await
                 }
                 None => {
                     bail!("invalid wasm module")
@@ -397,19 +388,6 @@ pub(crate) fn envs_from_ctx(ctx: &impl RuntimeContext) -> Vec<(String, String)> 
             (key.to_string(), value.to_string())
         })
         .collect()
-}
-
-fn store_for_context<T: WasiView + 'static>(
-    engine: &wasmtime::Engine,
-    ctx: T,
-) -> Result<(Store<T>, component::Linker<T>)> {
-    let store = Store::new(engine, ctx);
-
-    log::debug!("init linker");
-    let mut linker = component::Linker::new(engine);
-    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-
-    Ok((store, linker))
 }
 
 fn wasi_builder(ctx: &impl RuntimeContext) -> Result<WasiCtxBuilder, anyhow::Error> {
