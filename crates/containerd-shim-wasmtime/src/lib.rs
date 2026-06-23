@@ -1,3 +1,4 @@
+pub(crate) mod capabilities;
 mod http_proxy;
 pub mod instance;
 
